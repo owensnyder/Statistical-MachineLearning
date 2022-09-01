@@ -1,0 +1,250 @@
+---
+title: "ST558 HW9"
+author: "Owen Snyder"
+date: '2022-07-02'
+output:
+  github_document:
+---
+
+```{r eval=FALSE}
+## render code
+rmarkdown::render("ST558 HW9.Rmd",
+                  output_format = "github_document",
+                  output_file = "README.md",
+                  output_options = list(
+                    html_preview = FALSE, toc = TRUE, toc_depth = 2, toc_float = TRUE)
+)
+
+```
+
+
+# Packages
+```{r warning=FALSE,message=FALSE}
+library(tidyverse)
+library(caret)
+library(class)
+library(randomForest)
+library(gbm)
+```
+
+# Part 1: kNN
+
+## Read in Data
+```{r warning=FALSE,message=FALSE}
+heartData <- read_csv("/Users/owensnyder/Desktop/Statistical-MachineLearning/heart.csv")
+#as.factor(heartData$HeartDisease)
+#heartData$HeartDisease
+
+heartData <- heartData %>% mutate(HrtDisease = as.factor(HeartDisease))
+
+```
+
+## Create/Remove Variables
+
+Now I will be using the `dummyVars()` and `predict()` functions to create dummy variables corresponding to the categorical predictors in this data set.  
+
+I will then create a final data set to use for analysis that has my transformed data. I will also be removing the original categorical variables that I had transformed and also removing the ST_Slope variable.
+
+```{r}
+## Use dummyVars() to change the Sex, ChestPainType, and RestingECG variables to have numeric values
+## NOTE: ExerciseAngina variable was giving me trouble because it is also categorical so I
+## decided to create a dummy variable for it as well.
+dummy <- dummyVars("~ Sex + ChestPainType + RestingECG + ExerciseAngina", data = heartData)
+dummy.df <- data.frame(predict(dummy, newdata = heartData))
+
+
+## First I will combine the heartData set and my dummy.df dataframe into one
+combine.heart <- cbind(heartData,dummy.df)
+
+## Now i will remove variables and create a final data set
+## also removing the non-factor form of HeartDisease
+heart <-  combine.heart %>% select(-Sex, -ChestPainType, -RestingECG, -ST_Slope, -ExerciseAngina,
+                                   -HeartDisease)
+## head(heart)
+```
+
+
+## Split Data
+
+Now I will be splitting the data into a training and test set. I will be using *p=0.8* .  
+
+```{r}
+set.seed(558)
+trainIndex <- createDataPartition(heart$HrtDisease, p = 0.8, list = FALSE)
+heartTrain <- heart[trainIndex, ]
+heartTest <- heart[-trainIndex, ]
+
+```
+
+## Train the kNN Model
+
+Here, I am using repeated 10 fold cross-validation, with the number of repeats being 3. I am also pre-processing the data by centering and scaling. Lastly, I am setting the `tuneGrid` so that I am considering values of *k* of 1, 2, 3, . . . , 40.  
+
+NOTE: We are using every variable to predict heart disease.  
+
+```{r}
+## first need to set TrainControl and train function
+
+trainC <- trainControl(method = "repeatedcv", number = 10, repeats = 3)
+## now create kNN model
+knn.train <- train(HrtDisease ~ ., data=heartTrain, 
+                   method="knn",
+                   trControl=trainC, 
+                   preProcess=c("center", "scale"),
+                   tuneGrid=expand.grid(k=c(1:40)))
+## print output
+knn.train
+
+## kNN fit 
+knnFit <- knn(train = select(heartTrain), test = select(heartTest),
+              cl = heartTrain$HrtDisease, k = 39)
+## kNN prediction
+knnFitPred <- predict(knn.train, newdata = select(heartTest, -HrtDisease))
+## fit information, npo need to print
+fitInfo <- as_tibble(data.frame(knnFit, select(heartTest, HrtDisease)))
+
+tbl1 <- table(fitInfo$knnFit,fitInfo$HrtDisease)
+
+misClass <- 1 - sum(diag(tbl1))/sum(tbl1)
+## kNN misclassification rate
+misClass
+
+```
+
+## Check Model with `confusionMatrix()`
+
+```{r cache=TRUE}
+## create Confusion Matrix
+confusionMatrix(data = heartTest$HrtDisease, reference = knnFitPred)
+```
+
+
+# Part 2: Ensemble
+
+Predict HrtDisease (i.e HeartDisease) variable again but using ensemble methods.
+
+## Classification Tree
+
+Using a classification tree (use method = rpart: tuning parameter is cp, use values 0, 0.001, 0.002, ..,0.1). Using 5-fold CV this time.
+
+```{r cache=TRUE}
+## create classification tree fit
+cp.seq <- seq(0, 0.1, by = 0.001)
+newtrainC <- trainControl(method = "repeatedcv", number = 5, repeats = 3)
+classTree <- train(HrtDisease ~ ., 
+               method='rpart', 
+               trControl=newtrainC, 
+               data=heartTrain, 
+               tuneGrid = data.frame(cp = cp.seq),
+               preProcess=c("center", "scale"))
+classTree
+
+```
+
+### Check Model with `confusionMatrix()`
+
+```{r}
+## use predict() function
+classTreePred <- predict(classTree, newdata = select(heartTest, -HrtDisease))
+## create Confusion Matrix
+confMatrix.classtree <- confusionMatrix(data = heartTest$HrtDisease, reference = classTreePred)
+confMatrix.classtree
+
+```
+
+
+## Bagged Tree
+
+Fit a bagged tree (use method = treebag: no tuning parameter).  
+
+```{r}
+## create bagged tree fit 
+bagFit <- train(HrtDisease ~ ., 
+               method='treebag', 
+               trControl=newtrainC, 
+               data=heartTrain, 
+               preProcess=c("center", "scale"))
+bagFit
+```
+
+### Check Model with `confusionMatrix()`
+
+```{r}
+## use predict() function
+bagFitPred <- predict(bagFit, newdata = select(heartTest, -HrtDisease))
+
+## create Confusion Matrix
+confMatrix.bag <- confusionMatrix(data = heartTest$HrtDisease, reference = bagFitPred)
+confMatrix.bag
+
+```
+
+
+
+## Random Forest
+
+Fit a random forest (use method = rf: tuning parameter is mtry, use values of 1, 2, . . . , 15.  
+
+```{r warning=FALSE, message=FALSE,cache=TRUE}
+
+rfFit <- train(HrtDisease ~.,
+               data = heartTrain,
+               method = "rf",
+               trControl = newtrainC,
+               tuneGrid = data.frame(mtry = 1:15),
+               preProcess=c("center", "scale"),
+               verbose = FALSE)
+
+rfFit
+```
+
+### Check Model with `confusionMatrix()`
+
+```{r}
+## now do predict
+rfFitPred <- predict(rfFit, newdata = select(heartTest, -HrtDisease))
+
+## create Confusion Matrix
+confMatrix.rf <- confusionMatrix(data = heartTest$HrtDisease, reference = rfFitPred)
+confMatrix.rf
+
+```
+
+
+## Boosted Tree
+
+Fit a boosted tree (use method = gbm: tuning parameters are n.trees, interaction.depth, shrinkage,
+and n.minobsinnode, use all combinations of n.trees of 25, 50, 100, 150, and 200, interaction.depth
+of 1, 2, 3, 4, shrinkage = 0.1, and nminobsinnode = 10.  
+
+```{r}
+
+gbmGrid <-  expand.grid(interaction.depth = c(1,2,3,4), 
+                        n.trees = c(25,50,100,150,200), 
+                        shrinkage = 0.1,
+                        n.minobsinnode = 10)
+
+boostFit <- train(HrtDisease ~.,
+                  data = heartTrain,
+                  method = "gbm",
+                  trControl = newtrainC,
+                  preProcess = c("center", "scale"),
+                  tuneGrid = gbmGrid,
+                  verbose = FALSE)
+## Not printing this boostFit out because of all of the different combinations of output
+
+
+```
+
+
+### Check Model with `confusionMatrix()`
+
+```{r}
+## now use predict()
+boostFitPred <- predict(boostFit, newdata = select(heartTest, -HrtDisease))
+
+## create Confusion Matrix
+confMatrix.boost <- confusionMatrix(data = heartTest$HrtDisease, reference = boostFitPred)
+confMatrix.boost
+
+```
